@@ -1,0 +1,27 @@
+services:
+  web:
+    build: .
+    image: space-image-queue-reviewer:latest
+    environment:
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # 一次性验收服务：执行规则测试、页面构建检查、API/HTTP 冒烟后退出，以退出码报告结果
+  verify:
+    build: .
+    image: space-image-queue-reviewer:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      BASE_URL: "http://web:3000"
+    entrypoint: ["node"]
+    command: ["scripts/verify.js"]
+    restart: "no"

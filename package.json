@@ -1,0 +1,19 @@
+{
+  "name": "space-image-queue-reviewer",
+  "version": "1.0.0",
+  "description": "星载图像处理器跨队列缓冲区同步/所有权移交复核台",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/",
+    "check:page": "node scripts/check-page.js",
+    "smoke": "node scripts/smoke-http.js",
+    "verify": "node scripts/verify.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

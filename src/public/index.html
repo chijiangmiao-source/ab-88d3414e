@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>星载图像处理器 · 跨队列缓冲区同步复核</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --line:#2a3550; --fg:#e6ecf8; --muted:#93a0bb; --ok:#3ddc97; --bad:#ff5d73; --warn:#ffb454; --accent:#5aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: minmax(360px,460px) 1fr; gap:16px; padding:16px 24px; align-items:start; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  .panel h2 { font-size:14px; margin:0 0 10px; color:var(--accent); }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+  input, select { background:#0d1322; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font-size:13px; }
+  input[type=number] { width:80px; }
+  input.wide { flex:1; min-width:120px; }
+  button { background:var(--accent); color:#08111f; border:0; border-radius:6px; padding:6px 14px; font-weight:600; cursor:pointer; font-size:13px; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); font-weight:400; }
+  button.danger { background:transparent; color:var(--bad); border:1px solid var(--bad); font-weight:400; padding:2px 8px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:10px; background:#121a2b; }
+  .card .hd { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+  .card .hd .tag { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:0 6px; }
+  .op { display:flex; gap:6px; align-items:center; margin:4px 0; flex-wrap:wrap; }
+  .op .idx { color:var(--muted); font-size:11px; width:16px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .limit { color:var(--warn); font-size:12px; }
+  #result.ok { border-left:4px solid var(--ok); }
+  #result.bad { border-left:4px solid var(--bad); }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; margin-top:6px; }
+  th, td { border:1px solid var(--line); padding:4px 8px; text-align:left; }
+  th { color:var(--muted); font-weight:500; background:#121a2b; }
+  .pill { display:inline-block; border-radius:4px; padding:0 7px; font-size:11px; margin-right:4px; }
+  .pill.read { background:#1d3a5f; color:#9cc8ff; }
+  .pill.write { background:#15433a; color:#7df0c8; }
+  .pill.release { background:#4a3a12; color:#ffd98a; }
+  .pill.acquire { background:#3a2348; color:#d9a6ff; }
+  .badge-ok { color:var(--ok); font-weight:700; }
+  .badge-bad { color:var(--bad); font-weight:700; }
+  pre.ev { background:#0d1322; border:1px solid var(--line); border-radius:6px; padding:8px; font-size:12px; overflow:auto; margin:6px 0 0; }
+  .seq { font-family:ui-monospace,monospace; }
+  .seq span.more::before { content:" → "; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>星载图像处理器 · 跨队列缓冲区同步复核台</h1>
+  <span class="sub">上限：3 条队列 · 16 个缓冲区（每个 ≤64 单元）· 48 个提交</span>
+</header>
+
+<main>
+  <section>
+    <div class="panel">
+      <h2>标准场景</h2>
+      <div class="row">
+        <button class="ghost" data-scn="missingAcquire">缺少获取的跨队列读取（应拒绝）</button>
+        <button class="ghost" data-scn="completeTransfer">完整移交后读取（应通过）</button>
+        <button class="ghost" data-scn="deadlock">死锁环（应拒绝）</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>队列（至多 3）</h2>
+      <div id="queueList"></div>
+      <div class="row"><button class="ghost" id="addQueue">+ 队列</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>缓冲区（至多 16，长度 ≤64）</h2>
+      <div id="bufferList"></div>
+      <div class="row"><button class="ghost" id="addBuffer">+ 缓冲区</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>提交（至多 48，操作按顺序执行）</h2>
+      <div id="submissionList"></div>
+      <div class="row"><button class="ghost" id="addSubmission">+ 提交</button></div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="margin:0">
+        <button id="verifyBtn">提交复核</button>
+        <button class="ghost" id="exportBtn">导出 JSON</button>
+        <span class="muted" id="limitHint"></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel" id="result">
+      <h2>复核结果</h2>
+      <p class="muted">在左侧录入或载入场景后点击“提交复核”。复核器在 Worker 中按队列顺序与信号量等待建立偏序，并逐单元维护属主、最新写版本与待获取移交状态。</p>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict';
+/* global verifyPage, renderResult */
+// 页面脚本（由验收服务进行语法与结构检查）
+const LIMITS = { MAX_QUEUES: 3, MAX_BUFFERS: 16, MAX_BUFFER_LEN: 64, MAX_SUBMISSIONS: 48 };
+const OP_TYPES = ['read', 'write', 'release', 'acquire'];
+const state = { queues: [], buffers: [], submissions: [] };
+let uid = 0;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function renderQueues() {
+  const box = document.getElementById('queueList');
+  box.innerHTML = '';
+  state.queues.forEach((q, i) => {
+    const row = el('div', 'row');
+    const inp = document.createElement('input');
+    inp.className = 'wide'; inp.value = q.name; inp.placeholder = '队列名，如 decode-q';
+    inp.oninput = () => { q.name = inp.value; };
+    row.append(inp);
+    const del = el('button', 'danger', '删除');
+    del.onclick = () => { state.queues.splice(i, 1); renderAll(); };
+    row.append(del);
+    box.append(row);
+  });
+  document.getElementById('addQueue').disabled = state.queues.length >= LIMITS.MAX_QUEUES;
+}
+
+function renderBuffers() {
+  const box = document.getElementById('bufferList');
+  box.innerHTML = '';
+  state.buffers.forEach((b, i) => {
+    const row = el('div', 'row');
+    const name = document.createElement('input');
+    name.className = 'wide'; name.value = b.name; name.placeholder = '缓冲区名';
+    name.oninput = () => { b.name = name.value; };
+    const len = document.createElement('input');
+    len.type = 'number'; len.min = 1; len.max = 64; len.value = b.length;
+    len.title = '长度（单元数，≤64）';
+    len.oninput = () => { b.length = Number(len.value); };
+    const del = el('button', 'danger', '删除');
+    del.onclick = () => { state.buffers.splice(i, 1); renderAll(); };
+    row.append(name, len, del);
+    box.append(row);
+  });
+  document.getElementById('addBuffer').disabled = state.buffers.length >= LIMITS.MAX_BUFFERS;
+}
+
+function renderOps(card, s) {
+  const opsBox = el('div');
+  s.operations.forEach((op, j) => {
+    const row = el('div', 'op');
+    row.append(el('span', 'idx', String(j + 1)));
+    const type = document.createElement('select');
+    OP_TYPES.forEach((t) => { const o = document.createElement('option'); o.value = t; o.textContent = t; type.append(o); });
+    type.value = op.type;
+    type.onchange = () => { op.type = type.value; };
+    const buf = document.createElement('input');
+    buf.placeholder = '缓冲区'; buf.value = op.buffer;
+    buf.oninput = () => { op.buffer = buf.value; };
+    const off = document.createElement('input');
+    off.type = 'number'; off.min = 0; off.title = 'offset'; off.value = op.offset;
+    off.placeholder = 'offset';
+    off.oninput = () => { op.offset = Number(off.value); };
+    const lenI = document.createElement('input');
+    lenI.type = 'number'; lenI.min = 1; lenI.title = 'length'; lenI.value = op.length;
+    lenI.placeholder = 'len';
+    lenI.oninput = () => { op.length = Number(lenI.value); };
+    const up = el('button', 'ghost', '↑'); up.onclick = () => { if (j > 0) { [s.operations[j - 1], s.operations[j]] = [s.operations[j], s.operations[j - 1]]; renderAll(); } };
+    const down = el('button', 'ghost', '↓'); down.onclick = () => { if (j < s.operations.length - 1) { [s.operations[j + 1], s.operations[j]] = [s.operations[j], s.operations[j + 1]]; renderAll(); } };
+    const del = el('button', 'danger', '×'); del.onclick = () => { s.operations.splice(j, 1); renderAll(); };
+    row.append(type, buf, off, lenI, up, down, del);
+    opsBox.append(row);
+  });
+  const addOp = el('button', 'ghost', '+ 区间操作');
+  addOp.onclick = () => { s.operations.push({ type: 'read', buffer: state.buffers[0] ? state.buffers[0].name : '', offset: 0, length: 1 }); renderAll(); };
+  opsBox.append(addOp);
+  card.append(opsBox);
+}
+
+function renderSubmissions() {
+  const box = document.getElementById('submissionList');
+  box.innerHTML = '';
+  state.submissions.forEach((s, i) => {
+    const card = el('div', 'card');
+    const hd = el('div', 'hd');
+    const id = document.createElement('input');
+    id.value = s.id; id.placeholder = '提交 id';
+    id.oninput = () => { s.id = id.value; };
+    const qsel = document.createElement('select');
+    state.queues.forEach((q) => { const o = document.createElement('option'); o.value = q.name; o.textContent = q.name; qsel.append(o); });
+    qsel.value = s.queue;
+    qsel.onchange = () => { s.queue = qsel.value; };
+    hd.append(id, el('span', 'tag', '队列'), qsel);
+    const del = el('button', 'danger', '删除提交');
+    del.onclick = () => { state.submissions.splice(i, 1); renderAll(); };
+    hd.append(del);
+    card.append(hd);
+
+    const sync = el('div', 'op');
+    sync.append(el('span', 'muted', '等待'));
+    const wSem = document.createElement('input'); wSem.placeholder = '信号量名'; wSem.value = s.wait ? s.wait.semaphore : '';
+    const wVal = document.createElement('input'); wVal.type = 'number'; wVal.min = 1; wVal.value = s.wait ? s.wait.value : 1;
+    const applyWait = () => { s.wait = wSem.value.trim() ? { semaphore: wSem.value.trim(), value: Number(wVal.value) } : null; };
+    wSem.oninput = applyWait; wVal.oninput = applyWait;
+    sync.append(wSem, wVal);
+    sync.append(el('span', 'muted', '≥ 值'));
+    sync.append(el('span', 'muted', '｜递增'));
+    const sSem = document.createElement('input'); sSem.placeholder = '信号量名'; sSem.value = s.signal ? s.signal.semaphore : '';
+    sSem.oninput = () => { s.signal = sSem.value.trim() ? { semaphore: sSem.value.trim() } : null; };
+    sync.append(sSem);
+    card.append(sync);
+
+    renderOps(card, s);
+    box.append(card);
+  });
+  document.getElementById('addSubmission').disabled = state.submissions.length >= LIMITS.MAX_SUBMISSIONS;
+  const over = state.buffers.find((b) => b.length > LIMITS.MAX_BUFFER_LEN);
+  document.getElementById('limitHint').textContent = over ? '长度超过 64 的缓冲区将被拒绝' : '';
+}
+
+function renderAll() { renderQueues(); renderBuffers(); renderSubmissions(); }
+
+function gatherInput() {
+  return {
+    queues: state.queues.map((q) => q.name),
+    buffers: state.buffers.map((b) => ({ name: b.name, length: Number(b.length) })),
+    submissions: state.submissions.map((s) => {
+      const out = { id: s.id, queue: s.queue };
+      if (s.wait) out.wait = s.wait;
+      if (s.signal) out.signal = s.signal;
+      out.operations = s.operations;
+      return out;
+    })
+  };
+}
+
+function loadScenario(data) {
+  state.queues = data.queues.map((name) => ({ name }));
+  state.buffers = data.buffers.map((b) => ({ ...b }));
+  state.submissions = data.submissions.map((s) => ({
+    id: s.id, queue: s.queue,
+    wait: s.wait ? { ...s.wait } : null,
+    signal: s.signal ? { ...s.signal } : null,
+    operations: s.operations.map((o) => ({ ...o }))
+  }));
+  renderAll();
+}
+
+const rangeText = (r) => `${r.buffer}[${r.start}..${r.end - 1}]`;
+function renderResult(box, r) {
+  box.innerHTML = '';
+  if (r.ok) {
+    box.className = 'panel ok';
+    box.append(el('h2', null, '复核结果'));
+    box.append(el('p', null, '✅ ')); box.lastChild.append(el('span', 'badge-ok', '通过'));
+    box.lastChild.append(document.createTextNode('：所有区间读写均有完整的同步与所有权移交证据。'));
+    const seq = el('p', 'seq');
+    r.executableOrder.forEach((x, i) => {
+      const sp = el('span', i ? 'more' : null, `${x.id}@${x.queue}`);
+      seq.append(sp);
+    });
+    const h3a = el('h2', null, '可执行次序'); h3a.style.color = 'var(--fg)';
+    box.append(h3a, seq);
+
+    const h3 = el('h2', null, '受影响区间与版本证据'); h3.style.color = 'var(--fg)';
+    box.append(h3);
+    const table = document.createElement('table');
+    table.innerHTML = '<tr><th>提交</th><th>区间操作</th></tr>';
+    Object.entries(r.affectedRanges).forEach(([sid, info]) => {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td'); td1.textContent = `${sid} (${info.queue})`;
+      const td2 = document.createElement('td');
+      const all = []
+        .concat(info.reads.map((x) => ({ ...x, k: 'read' })))
+        .concat(info.writes.map((x) => ({ ...x, k: 'write' })))
+        .concat(info.releases.map((x) => ({ ...x, k: 'release' })))
+        .concat(info.acquires.map((x) => ({ ...x, k: 'acquire' })));
+      all.sort((a, b) => a.buffer.localeCompare(b.buffer) || a.start - b.start);
+      all.forEach((x) => {
+        const line = el('div');
+        line.append(el('span', `pill ${x.k}`, x.k));
+        line.append(document.createTextNode(`${rangeText(x)} v${x.version}`));
+        if (x.evidence) {
+          const pre = el('pre', 'ev', JSON.stringify(x.evidence, null, 1));
+          line.append(pre);
+        }
+        td2.append(line);
+      });
+      tr.append(td1, td2);
+      table.append(tr);
+    });
+    box.append(table);
+
+    const h3b = el('h2', null, '完成的所有权移交'); h3b.style.color = 'var(--fg)';
+    box.append(h3b);
+    const t2 = document.createElement('table');
+    t2.innerHTML = '<tr><th>区间</th><th>版本</th><th>移交证据</th></tr>';
+    r.transfers.forEach((t) => {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td'); a.textContent = rangeText(t);
+      const b = document.createElement('td'); b.textContent = `v${t.version}`;
+      const c = document.createElement('td');
+      c.append(el('pre', 'ev', JSON.stringify(t.evidence, null, 1)));
+      tr.append(a, b, c); t2.append(tr);
+    });
+    box.append(t2);
+  } else {
+    box.className = 'panel bad';
+    box.append(el('h2', null, '复核结果'));
+    const p = el('p', null, '⛔ '); p.append(el('span', 'badge-bad', '拒绝'));
+    p.append(document.createTextNode(` [${r.code}] ${r.message}`));
+    box.append(p);
+    const dl = [];
+    if (r.submissionId) dl.push(['首个违规提交', r.submissionId]);
+    if (r.queue) dl.push(['所在队列', r.queue]);
+    if (r.opType) dl.push(['违规操作', `${r.opType} (operations[${r.opIndex}])`]);
+    if (r.buffer) dl.push(['单元范围', `${r.buffer}[${r.start}..${r.end - 1}]`]);
+    if (r.currentOwner !== undefined) dl.push(['当前属主', r.currentOwner || '无']);
+    if (r.expectedVersion !== undefined) dl.push(['版本', `读取到 v${r.observedVersion}，当前应为 v${r.expectedVersion}`]);
+    if (r.cycle) dl.push(['死锁环', r.cycle.join(' → ')]);
+    if (r.executedPrefix && r.executedPrefix.length) dl.push(['已执行前缀', r.executedPrefix.join(' → ')]);
+    const table = document.createElement('table');
+    dl.forEach(([k, v]) => {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td'); a.textContent = k;
+      const b = document.createElement('td'); b.textContent = String(v);
+      tr.append(a, b); table.append(tr);
+    });
+    if (dl.length) box.append(table);
+    if (r.edges) box.append(el('pre', 'ev', JSON.stringify(r.edges, null, 1)));
+  }
+}
+
+// 复核在 Web Worker 中完成（偏序构建 + 逐单元模拟），不可用时回退到 HTTP API
+let reviewWorker = null;
+function getWorker() {
+  if (reviewWorker) return reviewWorker;
+  try {
+    reviewWorker = new Worker('/verifier/worker.js');
+    reviewWorker._busy = false;
+  } catch (e) {
+    reviewWorker = null;
+  }
+  return reviewWorker;
+}
+
+function verifyViaApi(input) {
+  return fetch('/api/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input)
+  }).then((resp) => resp.json());
+}
+
+function verifyPage() {
+  const box = document.getElementById('result');
+  box.className = 'panel';
+  box.innerHTML = '<h2>复核结果</h2><p class="muted">复核中（Worker 偏序分析）…</p>';
+  const input = gatherInput();
+  const w = getWorker();
+  if (w && !w._busy) {
+    const timer = setTimeout(() => {
+      // Worker 无响应时回退
+      try { w.terminate(); } catch { /* ignore */ }
+      reviewWorker = null;
+      verifyViaApi(input).then((r) => renderResult(box, r));
+    }, 4000);
+    w._busy = true;
+    w.onmessage = (e) => {
+      clearTimeout(timer);
+      w._busy = false;
+      renderResult(box, e.data);
+    };
+    w.onerror = () => {
+      clearTimeout(timer);
+      w._busy = false;
+      reviewWorker = null;
+      verifyViaApi(input).then((r) => renderResult(box, r));
+    };
+    w.postMessage({ input });
+    return;
+  }
+  verifyViaApi(input)
+    .then((r) => renderResult(box, r))
+    .catch((e) => {
+      box.className = 'panel bad';
+      box.innerHTML = '';
+      box.append(el('h2', null, '复核结果'), el('p', 'badge-bad', `请求失败: ${e}`));
+    });
+}
+
+document.getElementById('addQueue').onclick = () => { state.queues.push({ name: `q${state.queues.length + 1}` }); renderAll(); };
+document.getElementById('addBuffer').onclick = () => { state.buffers.push({ name: `buf${state.buffers.length + 1}`, length: 16 }); renderAll(); };
+document.getElementById('addSubmission').onclick = () => {
+  state.submissions.push({
+    id: `S${state.submissions.length + 1}`,
+    queue: state.queues[0] ? state.queues[0].name : '',
+    wait: null, signal: null,
+    operations: [{ type: 'write', buffer: state.buffers[0] ? state.buffers[0].name : '', offset: 0, length: 1 }]
+  });
+  renderAll();
+};
+document.getElementById('verifyBtn').onclick = verifyPage;
+document.getElementById('exportBtn').onclick = () => {
+  const blob = new Blob([JSON.stringify(gatherInput(), null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'review-input.json'; a.click();
+};
+document.querySelectorAll('[data-scn]').forEach((btn) => {
+  btn.onclick = () => {
+    fetch('/api/scenarios').then((r) => r.json()).then((all) => {
+      loadScenario(all[btn.getAttribute('data-scn')]);
+      document.getElementById('result').className = 'panel';
+      document.getElementById('result').innerHTML = '<h2>复核结果</h2><p class="muted">场景已载入，点击“提交复核”。</p>';
+    });
+  };
+});
+
+// 默认载入“缺少获取”场景，便于首屏直接复核
+window.verifyPage = verifyPage;
+window.renderResult = renderResult;
+fetch('/api/scenarios').then((r) => r.json()).then((all) => loadScenario(all.missingAcquire)).catch(() => renderAll());
+renderAll();
+</script>
+</body>
+</html>
