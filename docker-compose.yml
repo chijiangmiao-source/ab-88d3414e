@@ -1,0 +1,33 @@
+services:
+  web:
+    build: .
+    image: satellite-queue-verifier:latest
+    container_name: sqv-web
+    ports:
+      - "8080:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e",
+        "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 3s
+
+  # 一次性验收服务: 规则代码测试 + 页面构建检查 + API/HTTP 冒烟,
+  # 执行后退出, 以退出码报告验收结果。
+  # 运行: docker compose run --rm verify   (退出码 0 = 验收通过)
+  verify:
+    build: .
+    image: satellite-queue-verifier:latest
+    container_name: sqv-verify
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://web:8080
+    command: ["node", "scripts/acceptance.js"]
+    restart: "no"

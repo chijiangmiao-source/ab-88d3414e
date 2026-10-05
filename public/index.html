@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星载图像处理器 · 多队列缓冲区同步复核台</title>
+<style>
+  :root {
+    --bg:#0b1020; --panel:#141b30; --panel2:#1b2440; --line:#2a3656;
+    --text:#e7ecf7; --muted:#93a0c0; --accent:#5ee0c1; --accent2:#6aa8ff;
+    --ok:#3ddc84; --bad:#ff6b6b; --warn:#ffd166; --chip:#24304f;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:radial-gradient(1200px 600px at 80% -10%, #18233f 0%, var(--bg) 55%);
+    color:var(--text); font:14px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding:18px 24px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  }
+  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .badge {
+    background:var(--chip); border:1px solid var(--line); border-radius:999px;
+    padding:3px 10px; font-size:12px; color:var(--muted);
+  }
+  main { display:grid; grid-template-columns: minmax(380px, 460px) 1fr; gap:16px; padding:16px 24px 40px; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background:linear-gradient(180deg, var(--panel) 0%, #121930 100%);
+    border:1px solid var(--line); border-radius:14px; padding:16px;
+  }
+  .panel h2 { font-size:14px; margin:0 0 12px; color:var(--accent); display:flex; justify-content:space-between; align-items:center; }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+  label { color:var(--muted); font-size:12px; }
+  input, select, textarea {
+    background:#0e1528; border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:6px 8px; font-size:13px; outline:none;
+  }
+  input:focus, select:focus, textarea:focus { border-color:var(--accent2); }
+  input[type=number] { width:80px; }
+  input[type=text] { min-width:120px; }
+  button {
+    background:var(--accent2); color:#081226; border:0; border-radius:8px;
+    padding:7px 14px; font-weight:600; cursor:pointer; font-size:13px;
+  }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+  button.danger { background:#3a2330; color:#ffb3b3; border:1px solid #5a3040; }
+  button:hover { filter:brightness(1.1); }
+  .section { border-top:1px dashed var(--line); padding-top:12px; margin-top:12px; }
+  .card {
+    background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    padding:10px; margin-bottom:10px;
+  }
+  .card .head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+  .ops { display:flex; flex-direction:column; gap:6px; margin-top:6px; }
+  .op { display:flex; gap:6px; align-items:center; flex-wrap:wrap; background:#0e1528; border:1px solid var(--line); border-radius:8px; padding:6px; }
+  .op .kind-read { color:var(--accent2); }
+  .op .kind-write { color:var(--ok); }
+  .op .kind-release { color:var(--warn); }
+  .op .kind-acquire { color:#c79bff; }
+  .muted { color:var(--muted); font-size:12px; }
+  pre.json {
+    background:#0a1020; border:1px solid var(--line); border-radius:10px;
+    padding:12px; overflow:auto; max-height:360px; font-size:12px; margin:0;
+  }
+  .result-ok { border-left:4px solid var(--ok); }
+  .result-bad { border-left:4px solid var(--bad); }
+  .order-flow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
+  .node {
+    background:var(--chip); border:1px solid var(--line); border-radius:8px;
+    padding:4px 10px; font-size:12px;
+  }
+  .node b { color:var(--accent); }
+  .arrow { color:var(--muted); }
+  .range-line { font-size:12px; padding:3px 0; border-bottom:1px dotted var(--line); }
+  .tag { font-size:11px; padding:1px 7px; border-radius:999px; border:1px solid var(--line); }
+  .tag.read { color:var(--accent2); }
+  .tag.write { color:var(--ok); }
+  .tag.release { color:var(--warn); }
+  .tag.acquire { color:#c79bff; }
+  .error-box {
+    background:#241420; border:1px solid #5a3040; border-radius:10px; padding:12px;
+  }
+  .error-box code { color:#ffb3b3; }
+  .unitgrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap:8px; margin-top:8px; }
+  .unit { background:#0e1528; border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:11px; }
+  .pill { display:inline-block; min-width:16px; text-align:center; border-radius:5px; padding:0 5px; margin-right:3px; font-size:11px; }
+  .health-dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .health-dot.up { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰️ 多硬件队列缓冲区同步复核台</h1>
+  <span class="badge">队列 ≤ 3</span>
+  <span class="badge">缓冲区 ≤ 16 · 长度 ≤ 64 单元</span>
+  <span class="badge">提交 ≤ 48</span>
+  <span style="flex:1"></span>
+  <span class="muted">健康: <span id="healthDot" class="health-dot"></span> <span id="healthText">检测中…</span></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>操作页 · 录入
+      <span class="muted" id="countInfo"></span>
+    </h2>
+
+    <div class="section" style="border-top:0; padding-top:0; margin-top:0;">
+      <strong class="muted">队列</strong>
+      <div id="queueList" class="row"></div>
+      <button class="ghost" id="addQueue">+ 队列</button>
+    </div>
+
+    <div class="section">
+      <strong class="muted">缓冲区</strong>
+      <div id="bufferList"></div>
+      <button class="ghost" id="addBuffer">+ 缓冲区</button>
+    </div>
+
+    <div class="section">
+      <strong class="muted">提交（按录入顺序；同队列内即严格先后）</strong>
+      <div id="subList"></div>
+      <button class="ghost" id="addSub">+ 提交</button>
+    </div>
+
+    <div class="section toolbar">
+      <button id="run">▶ 执行复核</button>
+      <button class="ghost" id="loadMissing">载入：缺少获取的跨队列读取</button>
+      <button class="ghost" id="loadHandshake">载入：完整移交后读取</button>
+      <button class="danger" id="reset">清空</button>
+    </div>
+    <p class="muted" style="margin-bottom:0">
+      时间线语义：<code>signal</code> 使时间线递增（默认 +1），<code>wait</code> 要求达到指定值；
+      跨队列读必须具备 <b>release → 时间线先后 → acquire</b> 的完整证据且版本一致。
+    </p>
+  </section>
+
+  <section class="panel" id="resultPanel">
+    <h2>复核结论</h2>
+    <div id="result"><p class="muted">录入后点击“执行复核”，或先载入内置场景。</p></div>
+  </section>
+</main>
+
+<script src="/app/verifier.js"></script>
+<script>
+'use strict';
+const LIMITS = { queues: 3, buffers: 16, units: 64, subs: 48 };
+const state = {
+  queues: [{ id: 'Q_DECODE' }, { id: 'Q_ENCODE' }],
+  buffers: [{ id: 'IMG', length: 16 }],
+  submissions: []
+};
+
+const $ = (id) => document.getElementById(id);
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderQueues() {
+  $('queueList').innerHTML = state.queues.map((q, i) =>
+    `<input type="text" data-q="${i}" value="${esc(q.id)}" style="width:130px">
+     <button class="danger" data-delq="${i}">×</button>`).join('');
+  $('queueList').querySelectorAll('input').forEach((inp) => {
+    inp.oninput = () => { state.queues[+inp.dataset.q].id = inp.value; };
+  });
+  $('queueList').querySelectorAll('[data-delq]').forEach((b) => {
+    b.onclick = () => { state.queues.splice(+b.dataset.delq, 1); render(); };
+  });
+  $('addQueue').disabled = state.queues.length >= LIMITS.queues;
+}
+
+function renderBuffers() {
+  $('bufferList').innerHTML = state.buffers.map((b, i) =>
+    `<div class="row">
+       <label>ID</label><input type="text" data-bid="${i}" value="${esc(b.id)}" style="width:110px">
+       <label>长度</label><input type="number" min="1" max="64" data-blen="${i}" value="${b.length}">
+       <button class="danger" data-delb="${i}">×</button>
+     </div>`).join('');
+  $('bufferList').querySelectorAll('[data-bid]').forEach((inp) => {
+    inp.oninput = () => { state.buffers[+inp.dataset.bid].id = inp.value; };
+  });
+  $('bufferList').querySelectorAll('[data-blen]').forEach((inp) => {
+    inp.oninput = () => { state.buffers[+inp.dataset.blen].length = Math.max(1, Math.min(64, +inp.value || 1)); };
+  });
+  $('bufferList').querySelectorAll('[data-delb]').forEach((b) => {
+    b.onclick = () => { state.buffers.splice(+b.dataset.delb, 1); render(); };
+  });
+  $('addBuffer').disabled = state.buffers.length >= LIMITS.buffers;
+}
+
+function opBlock(s, oi) {
+  const op = s.ops[oi];
+  const bufOpts = state.buffers.map((b) =>
+    `<option value="${esc(b.id)}" ${op.buffer === b.id ? 'selected' : ''}>${esc(b.id)}</option>`).join('');
+  const maxLen = (state.buffers.find((b) => b.id === op.buffer) || { length: 64 }).length;
+  return `<div class="op">
+    <span class="kind-${op.kind}">${ {read:'读',write:'写',release:'释放',acquire:'获取'}[op.kind] }</span>
+    <select data-op="kind" data-s="${s._idx}" data-opi="${oi}">
+      ${['read','write','release','acquire'].map((k) =>
+        `<option value="${k}" ${op.kind === k ? 'selected' : ''}>${ {read:'read 读',write:'write 写',release:'release 释放',acquire:'acquire 获取'}[k] }</option>`).join('')}
+    </select>
+    <select data-op="buffer" data-s="${s._idx}" data-opi="${oi}">${bufOpts}</select>
+    <label>起</label><input type="number" min="0" data-op="start" data-s="${s._idx}" data-opi="${oi}" value="${op.start}">
+    <label>长</label><input type="number" min="1" max="${maxLen}" data-op="len" data-s="${s._idx}" data-opi="${oi}" value="${op.length}">
+    <button class="danger" data-delop="${oi}" data-s="${s._idx}">×</button>
+  </div>`;
+}
+
+function renderSubs() {
+  $('subList').innerHTML = state.submissions.map((s, idx) => {
+    s._idx = idx;
+    const qOpts = state.queues.map((q) =>
+      `<option value="${esc(q.id)}" ${s.queue === q.id ? 'selected' : ''}>${esc(q.id)}</option>`).join('');
+    return `<div class="card">
+      <div class="head">
+        <input type="text" data-sid="${idx}" value="${esc(s.id)}" style="width:90px">
+        <select data-sq="${idx}">${qOpts}</select>
+        <button class="danger" data-dels="${idx}">删除提交</button>
+      </div>
+      <div class="row">
+        <label>wait 时间线</label>
+        <input type="text" data-wt="${idx}" value="${esc(s.waitTimeline || '')}" placeholder="如 frame" style="width:100px">
+        <label>值</label>
+        <input type="number" min="1" data-wv="${idx}" value="${s.waitValue || ''}" style="width:70px">
+        <label>signal 时间线</label>
+        <input type="text" data-st="${idx}" value="${esc(s.sigTimeline || '')}" style="width:100px">
+        <label>递增</label>
+        <input type="number" min="1" data-si="${idx}" value="${s.sigIncrement || 1}" style="width:60px">
+      </div>
+      <div class="ops">${s.ops.map((_, oi) => opBlock(s, oi)).join('')}</div>
+      <div class="row" style="margin-top:6px">
+        <button class="ghost" data-addop="${idx}">+ 操作（按顺序执行）</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  const bind = (sel, fn) => $('subList').querySelectorAll(sel).forEach(fn);
+
+  bind('[data-sid]', (el) => el.oninput = () => state.submissions[+el.dataset.sid].id = el.value);
+  bind('[data-sq]', (el) => el.onchange = () => state.submissions[+el.dataset.sq].queue = el.value);
+  bind('[data-dels]', (el) => el.onclick = () => { state.submissions.splice(+el.dataset.dels, 1); render(); });
+  bind('[data-wt]', (el) => el.oninput = () => state.submissions[+el.dataset.wt].waitTimeline = el.value);
+  bind('[data-wv]', (el) => el.oninput = () => state.submissions[+el.dataset.wv].waitValue = +el.value);
+  bind('[data-st]', (el) => el.oninput = () => state.submissions[+el.dataset.st].sigTimeline = el.value);
+  bind('[data-si]', (el) => el.oninput = () => state.submissions[+el.dataset.si].sigIncrement = Math.max(1, +el.value || 1));
+  bind('[data-addop]', (el) => el.onclick = () => {
+    const s = state.submissions[+el.dataset.addop];
+    const bufId = (state.buffers[0] || { id: 'IMG' }).id;
+    s.ops.push({ kind: 'read', buffer: bufId, start: 0, length: 1 });
+    render();
+  });
+  bind('[data-delop]', (el) => el.onclick = () => {
+    const s = state.submissions[+el.dataset.s];
+    s.ops.splice(+el.dataset.delop, 1); render();
+  });
+  bind('select[data-op="kind"]', (el) => el.onchange = () => {
+    state.submissions[+el.dataset.s].ops[+el.dataset.opi].kind = el.value; render();
+  });
+  bind('select[data-op="buffer"]', (el) => el.onchange = () => {
+    state.submissions[+el.dataset.s].ops[+el.dataset.opi].buffer = el.value; render();
+  });
+  bind('input[data-op="start"]', (el) => el.oninput = () => {
+    state.submissions[+el.dataset.s].ops[+el.dataset.opi].start = Math.max(0, +el.value || 0);
+  });
+  bind('input[data-op="len"]', (el) => el.oninput = () => {
+    state.submissions[+el.dataset.s].ops[+el.dataset.opi].length = Math.max(1, +el.value || 1);
+  });
+
+  $('addSub').disabled = state.submissions.length >= LIMITS.subs;
+  $('countInfo').textContent =
+    `${state.queues.length}/3 队列 · ${state.buffers.length}/16 缓冲区 · ${state.submissions.length}/48 提交`;
+}
+
+function render() { renderQueues(); renderBuffers(); renderSubs(); }
+
+function toModel() {
+  return {
+    queues: state.queues.filter((q) => q.id.trim()).map((q) => ({ id: q.id.trim() })),
+    buffers: state.buffers.filter((b) => b.id.trim()).map((b) => ({ id: b.id.trim(), length: b.length })),
+    submissions: state.submissions
+      .filter((s) => s.id.trim())
+      .map((s) => {
+        const m = { id: s.id.trim(), queue: s.queue, ops: s.ops };
+        if (s.waitTimeline && s.waitTimeline.trim() && s.waitValue) {
+          m.wait = { timeline: s.waitTimeline.trim(), value: s.waitValue };
+        }
+        if (s.sigTimeline && s.sigTimeline.trim()) {
+          m.signal = { timeline: s.sigTimeline.trim(), increment: s.sigIncrement || 1 };
+        }
+        return m;
+      })
+  };
+}
+
+function loadScenario(sc) {
+  state.queues = sc.queues.map((q) => ({ ...q }));
+  state.buffers = sc.buffers.map((b) => ({ ...b }));
+  state.submissions = sc.submissions.map((s) => ({
+    id: s.id, queue: s.queue,
+    waitTimeline: s.wait ? s.wait.timeline : '',
+    waitValue: s.wait ? s.wait.value : '',
+    sigTimeline: s.signal ? s.signal.timeline : '',
+    sigIncrement: s.signal ? s.signal.increment : 1,
+    ops: s.ops.map((o) => ({ ...o }))
+  }));
+  render();
+}
+
+/* ---------------- 结果渲染 ---------------- */
+
+const CODE_TEXT = {
+  UNMET_WAIT: '无满足来源的等待',
+  DEADLOCK: '死锁环',
+  OUT_OF_ORDER: '首个无序访问（未初始化/越序读写）',
+  WRONG_OWNER: '错误所有者',
+  MISSING_ACQUIRE: '缺少获取的跨队列读取',
+  STALE_VERSION: '过期版本读取',
+  LIMIT_EXCEEDED: '超出操作页容量限制',
+  BAD_REQUEST: '请求非法'
+};
+
+function renderError(r) {
+  const ur = r.unitRange ? `缓冲区 <code>${esc(r.ur_buf || r.unitRange.buffer)}</code>
+     单元区间 <code>[${r.unitRange.start} .. ${r.unitRange.start + r.unitRange.length - 1}]</code>
+     （长度 ${r.unitRange.length}）` : '（无具体单元区间）';
+  const ring = r.ring && r.ring.length
+    ? `<p><b>死锁环：</b>${r.ring.map(esc).join(' → ')}</p>` : '';
+  const w = r.wait ? `<p class="muted">等待 ${esc(r.wait.timeline)} = ${r.wait.value}</p>` : '';
+  return `<div class="error-box result-bad" style="border-radius:10px">
+    <p style="margin:0 0 6px"><b style="color:var(--bad)">✗ 复核被拒绝 · ${esc(CODE_TEXT[r.code] || r.code)}</b></p>
+    <p style="margin:0 0 6px">${esc(r.message)}</p>
+    <p style="margin:0 0 6px"><b>定位提交：</b><code>${esc(r.submission || '-')}</code>
+       ${r.queue ? `（队列 <code>${esc(r.queue)}</code>）` : ''}</p>
+    <p style="margin:0 0 6px"><b>单元范围：</b>${ur}</p>
+    ${w}${ring}
+  </div>`;
+}
+
+function renderUnits(result) {
+  const bufs = Object.keys(result.units);
+  if (!bufs.length) return '';
+  return `<details><summary>逐单元：所有者 / 最新写版本 / 待获取移交证据</summary>
+    ${bufs.map((b) => {
+      const used = result.units[b].filter((u) => u.owner || u.version);
+      if (!used.length) return `<p class="muted">${esc(b)}：无访问</p>`;
+      return `<p class="muted" style="margin:8px 0 4px">${esc(b)}</p><div class="unitgrid">` +
+        used.map((u) => {
+          const p = u.pending;
+          const tr = (u.transfers && u.transfers.length)
+            ? u.transfers.map((t) =>
+              `<div class="muted">移交 v${t.version}：${esc(t.fromQueue)}(${esc(t.releasedBy)})
+               → ${esc(t.toQueue)}(${esc(t.acquiredBy)})</div>`).join('')
+            : '<div class="muted">无跨队列移交</div>';
+          return `<div class="unit">
+              <b>[${u.unit}]</b> 属主 <span class="pill" style="background:#1d2c4d">${esc(u.owner || '∅')}</span>
+              版本 <b style="color:var(--ok)">v${u.version}</b>
+              <div class="muted">pending: ${p
+                ? `${esc(p.fromQueue)} v${p.version}${p.acquiredBy ? ' → 已被 ' + esc(p.acquiredBy) + ' 获取' : '（待获取）'}`
+                : 'null'}</div>
+              ${tr}
+            </div>`;
+        }).join('') + '</div>';
+    }).join('')}
+  </details>`;
+}
+
+function renderOk(result) {
+  const flow = result.order.map((id, i) =>
+    `<span class="node">${i + 1}. <b>${esc(id)}</b></span>` +
+    (i < result.order.length - 1 ? '<span class="arrow">→</span>' : '')).join('');
+
+  const touched = result.touched.map((t) => {
+    const segs = t.ranges.map((r) =>
+      `<span class="tag ${r.kind}">${ {read:'读',write:'写',release:'释放',acquire:'获取'}[r.kind] }</span>
+       ${esc(r.buffer)} ` +
+      r.segments.map((s) => `[${s.start}..${s.start + s.length - 1}]`).join(', ')).join('；');
+    return `<div class="range-line"><code>${esc(t.submission)}</code> → ${segs}</div>`;
+  }).join('');
+
+  const tl = result.timeline.length
+    ? result.timeline.map((t) => `<span class="node">${esc(t.timeline)} = ${t.value}</span>`).join(' ')
+    : '<span class="muted">（无）</span>';
+
+  return `<div class="result-ok" style="padding-left:10px">
+    <p style="margin:0 0 4px"><b style="color:var(--ok)">✓ 复核通过</b>
+       所有跨队列读写均具备完整 release → 信号量先后 → acquire 证据且版本一致。</p>
+    <p class="muted" style="margin:6px 0"><b>提交可执行次序（满足队列顺序与信号量等待的一种拓扑序）</b></p>
+    <div class="order-flow">${flow}</div>
+    <p class="muted" style="margin:10px 0 4px"><b>受影响区间</b></p>
+    ${touched || '<p class="muted">无</p>'}
+    <p class="muted" style="margin:10px 0 4px"><b>时间线终态</b></p>
+    <div class="order-flow">${tl}</div>
+    ${renderUnits(result)}
+    <details style="margin-top:10px"><summary>原始 JSON 证据</summary>
+      <pre class="json">${esc(JSON.stringify(result, null, 2))}</pre></details>
+  </div>`;
+}
+
+async function runVerify() {
+  const panel = $('result');
+  panel.innerHTML = '<p class="muted">复核中…</p>';
+  let r;
+  try {
+    const resp = await fetch('/api/verify', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(toModel())
+    });
+    r = await resp.json();
+  } catch (e) {
+    panel.innerHTML = `<div class="error-box">请求失败: ${esc(e.message)}</div>`;
+    return;
+  }
+  const rp = $('resultPanel');
+  rp.classList.remove('result-ok', 'result-bad');
+  if (r.ok) { rp.classList.add('result-ok'); panel.innerHTML = renderOk(r); }
+  else { rp.classList.add('result-bad'); panel.innerHTML = renderError(r); }
+}
+
+async function checkHealth() {
+  try {
+    const r = await fetch('/healthz');
+    const j = await r.json();
+    $('healthDot').classList.add('up');
+    $('healthText').textContent = j.status === 'ok' ? '在线' : j.status;
+  } catch {
+    $('healthText').textContent = '离线';
+  }
+}
+
+/* ---------------- 事件 ---------------- */
+$('addQueue').onclick = () => { if (state.queues.length < 3) { state.queues.push({ id: 'Q_' + (state.queues.length + 1) }); render(); } };
+$('addBuffer').onclick = () => { if (state.buffers.length < 16) { state.buffers.push({ id: 'BUF' + (state.buffers.length + 1), length: 16 }); render(); } };
+$('addSub').onclick = () => {
+  if (state.submissions.length >= 48) return;
+  state.submissions.push({
+    id: 'S' + (state.submissions.length + 1),
+    queue: (state.queues[0] || { id: 'Q0' }).id,
+    waitTimeline: '', waitValue: '', sigTimeline: '', sigIncrement: 1,
+    ops: []
+  });
+  render();
+};
+$('run').onclick = runVerify;
+$('reset').onclick = () => {
+  state.queues = [{ id: 'Q_DECODE' }, { id: 'Q_ENCODE' }];
+  state.buffers = [{ id: 'IMG', length: 16 }];
+  state.submissions = [];
+  render(); $('result').innerHTML = '<p class="muted">已清空。</p>';
+};
+$('loadMissing').onclick = async () => {
+  const j = await (await fetch('/api/scenarios')).json();
+  loadScenario(j.scenarios.missingAcquire);
+  runVerify();
+};
+$('loadHandshake').onclick = async () => {
+  const j = await (await fetch('/api/scenarios')).json();
+  loadScenario(j.scenarios.fullHandshake);
+  runVerify();
+};
+
+render();
+checkHealth();
+</script>
+</body>
+</html>

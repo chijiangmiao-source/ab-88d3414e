@@ -1,0 +1,16 @@
+{
+  "name": "satellite-queue-verifier",
+  "version": "1.0.0",
+  "description": "星载图像处理器多硬件队列缓冲区同步/所有权移交复核器",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/node/server.js",
+    "test": "node --test test/",
+    "verify": "node scripts/acceptance.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
